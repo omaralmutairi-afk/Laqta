@@ -482,11 +482,13 @@ final class ClipRowView: NSTableCellView {
 final class ClipTableView: NSTableView {
     var onEnter: (() -> Void)?
     var onEscape: (() -> Void)?
+    var onDeleteSelected: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 36, 76: onEnter?() // Return / keypad Enter
         case 53: onEscape?()    // Escape
+        case 51, 117: onDeleteSelected?() // Backspace / Forward Delete
         default: super.keyDown(with: event)
         }
     }
@@ -664,6 +666,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.action = #selector(rowClicked)
         tableView.onEnter = { [weak self] in self?.pasteSelected() }
         tableView.onEscape = { [weak self] in self?.dismiss() }
+        tableView.onDeleteSelected = { [weak self] in self?.deleteSelected() }
 
         let column = NSTableColumn(identifier: .init("clip"))
         column.width = 300
@@ -780,6 +783,20 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.scrollRowToVisible(next)
     }
 
+    /// Backspace/Delete on the selected row — the keyboard equivalent of its
+    /// ✕ button. Doesn't dismiss the panel, so repeated presses can clear
+    /// several items in a row.
+    private func deleteSelected() {
+        guard visible.indices.contains(tableView.selectedRow) else { return }
+        let row = tableView.selectedRow
+        let id = visible[row].id
+        ClipboardStore.shared.delete(id) // synchronously reloads `visible` via .clipHistoryChanged
+        guard !visible.isEmpty else { return }
+        let next = min(row, visible.count - 1)
+        tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        tableView.scrollRowToVisible(next)
+    }
+
     private func selectFirstRow() {
         if visible.isEmpty {
             tableView.deselectAll(nil)
@@ -814,6 +831,12 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
             moveSelection(by: 1)
         case #selector(NSResponder.insertNewline(_:)):
             pasteSelected()
+        case #selector(NSResponder.deleteBackward(_:)), #selector(NSResponder.deleteForward(_:)):
+            // Only takes over once the search box is already empty — otherwise
+            // this is just an ordinary Backspace while typing a query, and the
+            // field needs to handle it itself.
+            guard searchField.stringValue.isEmpty else { return false }
+            deleteSelected()
         case #selector(NSResponder.cancelOperation(_:)):
             // Escape clears the search first, and only closes an empty box —
             // so a mistyped query doesn't cost you the whole panel.
