@@ -440,8 +440,12 @@ final class ClipRowView: NSTableCellView {
             let full = item.text ?? ""
             preview.stringValue = full.replacingOccurrences(of: "\n", with: " ⏎ ")
             // Two lines is all a row can show; hovering reveals the rest with
-            // its real line breaks, capped so a huge paste can't fill the screen.
-            toolTip = full.count > 600 ? String(full.prefix(600)) + "…" : full
+            // its real line breaks, capped so a huge paste can't fill the
+            // screen — or blow up row recycling on a multi-megabyte copy.
+            // Comparing endIndex after prefix(600) avoids full.count, which
+            // would walk the entire string just to size-check it.
+            let head = full.prefix(600)
+            toolTip = head.endIndex == full.endIndex ? full : String(head) + "…"
         case .image:
             if let data = item.imageData, let image = NSImage(data: data) {
                 imagePreview.image = image
@@ -471,6 +475,10 @@ final class ClipRowView: NSTableCellView {
 
 /// Arrow keys already move the selection via NSTableView's built-in key
 /// bindings once it's first responder; only Return/Escape need intercepting.
+/// The search field is first responder when the panel opens and forwards
+/// these same keys itself (see `control(_:textView:doCommandBy:)`), but
+/// Tab can still hand focus to this table directly, so this stays live
+/// rather than becoming dead code.
 final class ClipTableView: NSTableView {
     var onEnter: (() -> Void)?
     var onEscape: (() -> Void)?
@@ -624,7 +632,14 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         searchField.font = .systemFont(ofSize: 12)
         searchField.focusRingType = .none
         searchField.delegate = self
-        searchField.sendsWholeSearchString = false
+        searchField.target = self
+        searchField.action = #selector(searchFieldAction)
+        // Only Return, the search button, or the field's own (×) clear button
+        // fire the action this way — the delegate's controlTextDidChange
+        // below is what drives live filtering per keystroke. The (×) button
+        // sets stringValue directly, which does not trigger textDidChange,
+        // so without this the list would stay stuck on the old query.
+        searchField.sendsWholeSearchString = true
         container.addSubview(searchField)
 
         let searchSeparator = NSBox(frame: NSRect(x: 0, y: searchField.frame.minY - 6, width: background.bounds.width, height: 1))
@@ -777,6 +792,14 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     // MARK: NSSearchFieldDelegate
 
     func controlTextDidChange(_ obj: Notification) {
+        reload()
+        selectFirstRow()
+    }
+
+    /// Fires on Return or a click on the field's own (×) clear button —
+    /// the latter doesn't post textDidChange, so this is the only signal
+    /// that the query was reset that way.
+    @objc private func searchFieldAction() {
         reload()
         selectFirstRow()
     }
