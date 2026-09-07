@@ -284,6 +284,16 @@ final class ClipboardWatcher {
         }
     }
 
+    /// Called right after Laqta itself writes to the pasteboard — paste-back,
+    /// copy-only, or a joined multi-select paste. Without this, the very
+    /// write that lets an old item get pasted looks to the poller like a
+    /// brand-new copy, and either bumps that item back to the top of the
+    /// list or (for a join) adds a bogus new entry — moving it from wherever
+    /// it actually was.
+    func noteOwnWrite() {
+        lastChangeCount = NSPasteboard.general.changeCount
+    }
+
     private func poll() {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
@@ -334,6 +344,10 @@ enum Paster {
         case .image:
             if let data = item.imageData { pb.setData(data, forType: .png) }
         }
+        // Otherwise the watcher sees this write as a fresh copy and bumps
+        // this same item back to the top of the list, moving it from
+        // wherever it actually sits.
+        ClipboardWatcher.shared.noteOwnWrite()
     }
 
     /// Multi-select paste: joins each selected item's text with a blank line
@@ -345,6 +359,10 @@ enum Paster {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(joined, forType: .string)
+        // Otherwise this joined text — which matches none of the selected
+        // items — gets picked up as a brand-new copy and added as a bogus
+        // extra entry in the history.
+        ClipboardWatcher.shared.noteOwnWrite()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             simulateCommandV()
         }
