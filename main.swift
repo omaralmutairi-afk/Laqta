@@ -1,4 +1,5 @@
 import Cocoa
+import QuartzCore
 import Carbon.HIToolbox
 import ApplicationServices
 import ServiceManagement
@@ -412,6 +413,7 @@ final class ClipRowView: NSTableCellView {
         pinButton.isBordered = false
         pinButton.target = self
         pinButton.action = #selector(pinTapped)
+        pinButton.wantsLayer = true
         addSubview(pinButton)
 
         deleteButton.bezelStyle = .inline
@@ -492,7 +494,28 @@ final class ClipRowView: NSTableCellView {
     }
 
     @objc private func pinTapped() {
+        animatePinToggle()
         onTogglePin?()
+    }
+
+    /// A quick scale-pop on the pin glyph — same trigger from a click or the
+    /// right-arrow shortcut — so toggling it reads as a deliberate action
+    /// rather than a silent icon swap. Mirrors the pop Naqla already uses
+    /// for its own icon hover feedback.
+    func animatePinToggle() {
+        let layer = pinButton.layer!
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.1)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        layer.setAffineTransform(CGAffineTransform(scaleX: 1.4, y: 1.4))
+        CATransaction.commit()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.16)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.4, 0.0, 0.9, 0.5))
+            layer.setAffineTransform(.identity)
+            CATransaction.commit()
+        }
     }
 
     @objc private func deleteTapped() {
@@ -516,12 +539,15 @@ final class ClipTableView: NSTableView {
     var onEnter: (() -> Void)?
     var onEscape: (() -> Void)?
     var onDeleteSelected: (() -> Void)?
+    var onTogglePinSelected: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 36, 76: onEnter?() // Return / keypad Enter
         case 53: onEscape?()    // Escape
         case 51, 117: onDeleteSelected?() // Backspace / Forward Delete
+        case 124: onTogglePinSelected?() // Right arrow
+        case 123: onDeleteSelected?()    // Left arrow — same action as ⌫
         default: super.keyDown(with: event)
         }
     }
@@ -568,6 +594,12 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     /// The rows actually on screen — the history filtered by the search box.
     /// Every index the table hands back refers to this, never to the store.
     private var visible: [ClipItem] = []
+
+    /// Set while deleteRows(withIDs:) is animating a removal — the store
+    /// mutation it triggers would otherwise post .clipHistoryChanged and run
+    /// a full tableView.reloadData() on top of the in-flight removeRows
+    /// animation, canceling it before it can play.
+    private var suppressTableReload = false
 
     /// Wired up by the app delegate — the panel itself doesn't own Settings.
     var onOpenSettings: (() -> Void)?
@@ -705,6 +737,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.onEnter = { [weak self] in self?.pasteSelected() }
         tableView.onEscape = { [weak self] in self?.dismiss() }
         tableView.onDeleteSelected = { [weak self] in self?.deleteSelected() }
+        tableView.onTogglePinSelected = { [weak self] in self?.togglePinSelected() }
 
         let column = NSTableColumn(identifier: .init("clip"))
         column.width = 300
@@ -797,9 +830,12 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         // localizedStandardContains ignores case and diacritics, which matters
         // for Arabic — "لقطة" should find "لَقْطة".
         visible = query.isEmpty ? all : all.filter { ($0.text ?? "").localizedStandardContains(query) }
-        tableView.reloadData()
         emptyLabel.isHidden = !visible.isEmpty
         emptyLabel.stringValue = query.isEmpty ? "لا يوجد شيء منسوخ بعد" : "لا نتائج"
+        // deleteRows(withIDs:) already told the table exactly which rows left
+        // and is mid-animation — a full reloadData() here would cut it off.
+        guard !suppressTableReload else { return }
+        tableView.reloadData()
         selectFirstRow()
     }
 
@@ -857,18 +893,58 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.scrollRowToVisible(focusRow)
     }
 
-    /// Backspace/Delete — the keyboard equivalent of a row's ✕ button, for
-    /// every selected row when Shift+↑/↓ picked out more than one. Doesn't
-    /// dismiss the panel, so repeated presses can clear several items.
+    /// Backspace/Delete or ← — the keyboard equivalent of a row's ✕ button,
+    /// for every selected row when Shift+↑/↓ picked out more than one.
+    /// Doesn't dismiss the panel, so repeated presses can clear several items.
     private func deleteSelected() {
         let rows = tableView.selectedRowIndexes
         guard !rows.isEmpty, rows.allSatisfy({ visible.indices.contains($0) }) else { return }
-        let topRow = rows.min()!
-        // Collect ids up front and delete by id, not index — each delete
-        // reloads `visible` synchronously (via .clipHistoryChanged), which
-        // would shift later indices out from under a second lookup.
         let ids = rows.sorted().map { visible[$0].id }
+        deleteRows(withIDs: ids)
+    }
+
+    /// Right arrow — the keyboard equivalent of tapping a row's pin button.
+    private func togglePinSelected() {
+        guard visible.indices.contains(tableView.selectedRow) else { return }
+        let row = tableView.selectedRow
+        let id = visible[row].id
+        // togglePin's own .clipHistoryChanged triggers reload(), which resets
+        // selection to row 0 via selectFirstRow() — needed to refresh the
+        // pin glyph, but pinning never reorders or filters the list, so
+        // `row` still refers to the same item and the selection it reset
+        // gets put right back once this returns.
+        ClipboardStore.shared.togglePin(id)
+        anchorRow = row
+        focusRow = row
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        if let rowView = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? ClipRowView {
+            rowView.animatePinToggle()
+        }
+    }
+
+    /// The one path behind the ✕ button, ⌫/Delete, and ← — all three read as
+    /// the same action, so they share the same slide-left-and-fade removal
+    /// rather than an abrupt reloadData().
+    private func deleteRows(withIDs ids: [UUID]) {
+        let rows = IndexSet(visible.indices.filter { ids.contains(visible[$0].id) })
+        guard !rows.isEmpty else { return }
+        let topRow = rows.min()!
+
+        suppressTableReload = true
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            tableView.beginUpdates()
+            visible.removeAll { ids.contains($0.id) }
+            tableView.removeRows(at: rows, withAnimation: [.slideLeft, .effectFade])
+            tableView.endUpdates()
+        }
+        // Collect-then-delete-by-id already happened via `ids`; each call
+        // still posts .clipHistoryChanged, but reload() is suppressed above
+        // so it can't fight the animation with a full reloadData().
         ids.forEach { ClipboardStore.shared.delete($0) }
+        suppressTableReload = false
+
         guard !visible.isEmpty else { return }
         let next = min(topRow, visible.count - 1)
         anchorRow = next
@@ -921,6 +997,14 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
             // field needs to handle it itself.
             guard searchField.stringValue.isEmpty else { return false }
             deleteSelected()
+        case #selector(NSResponder.moveLeft(_:)):
+            // Same "only once the query is empty" rule as Backspace — Left
+            // still has to move the text cursor while there's a query to edit.
+            guard searchField.stringValue.isEmpty else { return false }
+            deleteSelected()
+        case #selector(NSResponder.moveRight(_:)):
+            guard searchField.stringValue.isEmpty else { return false }
+            togglePinSelected()
         case #selector(NSResponder.cancelOperation(_:)):
             // Escape clears the search first, and only closes an empty box —
             // so a mistyped query doesn't cost you the whole panel.
@@ -960,10 +1044,18 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         let rowView = (tableView.makeView(withIdentifier: identifier, owner: self) as? ClipRowView) ?? ClipRowView(frame: .zero)
         rowView.identifier = identifier
         let item = visible[row]
-        rowView.configure(with: item, togglePin: {
+        rowView.configure(with: item, togglePin: { [weak self] in
             ClipboardStore.shared.togglePin(item.id)
-        }, delete: {
-            ClipboardStore.shared.delete(item.id)
+            // Same fixup as togglePinSelected(): the resulting reload() reset
+            // selection to row 0 to refresh the pin glyph, but a click here
+            // didn't necessarily start from the keyboard-selected row, so put
+            // selection back on the row that was actually clicked.
+            guard let self else { return }
+            self.anchorRow = row
+            self.focusRow = row
+            self.tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }, delete: { [weak self] in
+            self?.deleteRows(withIDs: [item.id])
         }, copy: { [weak self] in
             self?.dismiss()
             Paster.copyOnly(item)
