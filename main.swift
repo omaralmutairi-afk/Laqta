@@ -188,9 +188,10 @@ final class ClipboardStore {
         ioQueue.sync {}
     }
 
-    /// Re-copying something already in the list (including our own
-    /// paste-back writing the item back onto the system pasteboard) just
-    /// bumps it to the top instead of creating a duplicate row.
+    /// Re-copying something already in the list bumps it to the top instead
+    /// of creating a duplicate row. (Laqta's own paste-back write no longer
+    /// reaches here at all — see ClipboardWatcher.noteOwnWrite — but a
+    /// genuine re-copy of the same content from outside still should.)
     func add(_ item: ClipItem) {
         if let idx = items.firstIndex(where: { $0.sameContent(as: item) }) {
             var existing = items.remove(at: idx)
@@ -692,6 +693,11 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.rowHeight = rowHeight
         tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.selectionHighlightStyle = .regular
+        // Shift+↑/↓ (extendSelection) already selects multiple rows via direct
+        // API calls regardless of this flag, but leaving it false understates
+        // the control's real capability to accessibility clients like
+        // VoiceOver, which query it to describe what the list supports.
+        tableView.allowsMultipleSelection = true
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
@@ -778,9 +784,13 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         // The search field is first responder so typing works immediately;
         // its delegate forwards arrow keys, Return and Escape to the list.
         window.makeFirstResponder(searchField)
-        selectFirstRow()
     }
 
+    /// Also fires directly off `.clipHistoryChanged` (a copy arriving, or a
+    /// change made from outside this panel) — always resetting selection
+    /// here, not just at the call sites that used to pair reload() with
+    /// selectFirstRow() by hand, is what keeps a multi-selection from
+    /// silently pointing at the wrong rows after the list shifts under it.
     @objc private func reload() {
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let all = ClipboardStore.shared.items
@@ -790,6 +800,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.reloadData()
         emptyLabel.isHidden = !visible.isEmpty
         emptyLabel.stringValue = query.isEmpty ? "لا يوجد شيء منسوخ بعد" : "لا نتائج"
+        selectFirstRow()
     }
 
     @objc private func rowClicked() {
@@ -881,7 +892,6 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
 
     func controlTextDidChange(_ obj: Notification) {
         reload()
-        selectFirstRow()
     }
 
     /// Fires on Return or a click on the field's own (×) clear button —
@@ -889,7 +899,6 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     /// that the query was reset that way.
     @objc private func searchFieldAction() {
         reload()
-        selectFirstRow()
     }
 
     /// The search box holds focus so you can just type, so the keys that drive
@@ -920,7 +929,6 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
             } else {
                 searchField.stringValue = ""
                 reload()
-                selectFirstRow()
             }
         default:
             return false
