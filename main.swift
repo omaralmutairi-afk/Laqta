@@ -142,6 +142,7 @@ final class ClipboardStore {
 
     private(set) var items: [ClipItem] = []
     private var sweepTimer: Timer?
+    private let ioQueue = DispatchQueue(label: "com.omar.laqta.store-io")
 
     private let fileURL: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -162,13 +163,29 @@ final class ClipboardStore {
     private func load() {
         guard let data = try? Data(contentsOf: fileURL),
               let saved = try? JSONDecoder().decode([ClipItem].self, from: data) else { return }
-        items = saved.sorted { $0.timestamp > $1.timestamp }
-        expire()
+        // Expire without notifying: this runs inside the singleton's own
+        // initialiser, and an observer reacting to it would re-enter
+        // ClipboardStore.shared before it finishes initialising.
+        let kept = unexpired(saved.sorted { $0.timestamp > $1.timestamp })
+        items = kept
+        if kept.count != saved.count { save() }
     }
 
+    /// Encoding and writing the whole history (images included) can be tens
+    /// of megabytes, so it must not happen on the main thread while the user
+    /// is copying. The serial queue keeps writes in order.
     private func save() {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        let snapshot = items
+        let url = fileURL
+        ioQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Waits for any in-flight write so quitting can't drop the last copy.
+    func flush() {
+        ioQueue.sync {}
     }
 
     /// Re-copying something already in the list (including our own
@@ -206,11 +223,15 @@ final class ClipboardStore {
 
     /// Drops unpinned items older than the retention window.
     func expire() {
-        let cutoff = Date().addingTimeInterval(-Double(SettingsStore.shared.retentionHours) * 3600)
-        let before = items.count
-        items.removeAll { !$0.pinned && $0.timestamp < cutoff }
-        guard items.count != before else { return }
+        let kept = unexpired(items)
+        guard kept.count != items.count else { return }
+        items = kept
         persistAndNotify()
+    }
+
+    private func unexpired(_ list: [ClipItem]) -> [ClipItem] {
+        let cutoff = Date().addingTimeInterval(-Double(SettingsStore.shared.retentionHours) * 3600)
+        return list.filter { $0.pinned || $0.timestamp >= cutoff }
     }
 
     /// Re-applies limits after the user changes them in Settings.
@@ -291,10 +312,10 @@ final class ClipboardWatcher {
 // MARK: - Paste-back
 
 enum Paster {
-    /// Writes the item back onto the system pasteboard, then simulates a
-    /// real ⌘V into whatever app was frontmost. The panel is a
-    /// non-activating one (see PanelWindowController), so that app never
-    /// actually lost key focus — no refocusing dance needed first.
+    /// Writes the item back onto the system pasteboard, then simulates a real
+    /// ⌘V. The caller dismisses the panel and reactivates the app the user
+    /// came from first; the delay below gives that activation time to land,
+    /// since posting ⌘V too early sends it nowhere.
     static func paste(_ item: ClipItem) {
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -304,7 +325,7 @@ enum Paster {
         case .image:
             if let data = item.imageData { pb.setData(data, forType: .png) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             simulateCommandV()
         }
     }
@@ -388,9 +409,12 @@ final class ClipRowView: NSTableCellView {
     func configure(with item: ClipItem, togglePin: @escaping () -> Void, delete: @escaping () -> Void) {
         onTogglePin = togglePin
         onDelete = delete
+        // Rows are recycled, so clear both slots first — otherwise an item
+        // whose image fails to decode would show the previous row's picture.
+        imagePreview.image = nil
+        preview.stringValue = ""
         switch item.kind {
         case .text:
-            imagePreview.image = nil
             preview.stringValue = (item.text ?? "").replacingOccurrences(of: "\n", with: " ⏎ ")
         case .image:
             if let data = item.imageData, let image = NSImage(data: data) {
@@ -441,12 +465,17 @@ final class ClipPanel: NSPanel {
 /// The header doubles as the drag handle — dragging anywhere else would
 /// fight with click-to-paste on the rows.
 final class DragHandleView: NSView {
-    var onDragFinished: (() -> Void)?
+    var onMoved: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         // performDrag runs its own event loop and returns once the drag ends.
+        let before = window?.frame.origin
         window?.performDrag(with: event)
-        onDragFinished?()
+        // A plain click lands here too, so only report an actual move —
+        // otherwise one stray click would pin the panel's position for good.
+        if let before, let after = window?.frame.origin, before != after {
+            onMoved?()
+        }
     }
 
     override func resetCursorRects() {
@@ -512,7 +541,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         let topInset: CGFloat = 6 // breathing room from the rounded top edge
         let header = DragHandleView(frame: NSRect(x: 0, y: background.bounds.height - headerHeight - topInset, width: background.bounds.width, height: headerHeight))
         header.autoresizingMask = [.width, .minYMargin]
-        header.onDragFinished = { [weak self] in self?.savePanelOrigin() }
+        header.onMoved = { [weak self] in self?.savePanelOrigin() }
 
         let title = NSTextField(labelWithString: "لَقْطة")
         title.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -756,6 +785,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         )
         window.title = "إعدادات لَقْطة"
         window.center()
+        // The delegate keeps this controller alive and reopens the same
+        // window, so closing must not deallocate it.
+        window.isReleasedWhenClosed = false
         self.init(window: window)
         window.delegate = self
         buildUI(in: window)
@@ -1007,6 +1039,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        ClipboardStore.shared.flush()
     }
 
     /// Posting a synthetic ⌘V (see Paster) needs Accessibility access on
