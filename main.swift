@@ -336,6 +336,20 @@ enum Paster {
         }
     }
 
+    /// Multi-select paste: joins each selected item's text with a blank line
+    /// and pastes the result as one block. Images can't be concatenated this
+    /// way, so they're silently skipped when joining more than one item —
+    /// only the earlier `paste(_:)` handles a single image.
+    static func pasteJoined(_ items: [ClipItem]) {
+        let joined = items.compactMap(\.text).joined(separator: "\n\n")
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(joined, forType: .string)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            simulateCommandV()
+        }
+    }
+
     private static func simulateCommandV() {
         let source = CGEventSource(stateID: .hidSystemState)
         let vKeyCode: CGKeyCode = 9 // 'V' on ANSI layouts
@@ -764,8 +778,17 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         pasteRow(tableView.clickedRow)
     }
 
+    /// A plain paste is one row; Shift+↑/↓ can select several, which pastes
+    /// them joined into a single block instead.
     private func pasteSelected() {
-        pasteRow(tableView.selectedRow)
+        let rows = tableView.selectedRowIndexes
+        guard rows.count > 1 else {
+            pasteRow(tableView.selectedRow)
+            return
+        }
+        let items = rows.sorted().compactMap { visible.indices.contains($0) ? visible[$0] : nil }
+        dismiss()
+        Paster.pasteJoined(items)
     }
 
     private func pasteRow(_ row: Int) {
@@ -775,29 +798,59 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         Paster.paste(item)
     }
 
+    /// Anchor/focus pair driving Shift+↑/↓: anchor is the fixed end of the
+    /// range, focus is the end that moves. A plain (non-shift) move collapses
+    /// both back onto the same row, same as clicking a single row would.
+    private var anchorRow = 0
+    private var focusRow = 0
+
     private func moveSelection(by delta: Int) {
         guard !visible.isEmpty else { return }
         let current = tableView.selectedRow < 0 ? 0 : tableView.selectedRow
         let next = min(max(current + delta, 0), visible.count - 1)
+        anchorRow = next
+        focusRow = next
         tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         tableView.scrollRowToVisible(next)
     }
 
-    /// Backspace/Delete on the selected row — the keyboard equivalent of its
-    /// ✕ button. Doesn't dismiss the panel, so repeated presses can clear
-    /// several items in a row.
-    private func deleteSelected() {
-        guard visible.indices.contains(tableView.selectedRow) else { return }
-        let row = tableView.selectedRow
-        let id = visible[row].id
-        ClipboardStore.shared.delete(id) // synchronously reloads `visible` via .clipHistoryChanged
+    /// Shift+↑/↓: extends the selection from wherever it currently sits.
+    private func extendSelection(by delta: Int) {
         guard !visible.isEmpty else { return }
-        let next = min(row, visible.count - 1)
+        if tableView.selectedRowIndexes.count <= 1 {
+            let current = tableView.selectedRow < 0 ? 0 : tableView.selectedRow
+            anchorRow = current
+            focusRow = current
+        }
+        focusRow = min(max(focusRow + delta, 0), visible.count - 1)
+        let range = min(anchorRow, focusRow)...max(anchorRow, focusRow)
+        tableView.selectRowIndexes(IndexSet(integersIn: range), byExtendingSelection: false)
+        tableView.scrollRowToVisible(focusRow)
+    }
+
+    /// Backspace/Delete — the keyboard equivalent of a row's ✕ button, for
+    /// every selected row when Shift+↑/↓ picked out more than one. Doesn't
+    /// dismiss the panel, so repeated presses can clear several items.
+    private func deleteSelected() {
+        let rows = tableView.selectedRowIndexes
+        guard !rows.isEmpty, rows.allSatisfy({ visible.indices.contains($0) }) else { return }
+        let topRow = rows.min()!
+        // Collect ids up front and delete by id, not index — each delete
+        // reloads `visible` synchronously (via .clipHistoryChanged), which
+        // would shift later indices out from under a second lookup.
+        let ids = rows.sorted().map { visible[$0].id }
+        ids.forEach { ClipboardStore.shared.delete($0) }
+        guard !visible.isEmpty else { return }
+        let next = min(topRow, visible.count - 1)
+        anchorRow = next
+        focusRow = next
         tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         tableView.scrollRowToVisible(next)
     }
 
     private func selectFirstRow() {
+        anchorRow = 0
+        focusRow = 0
         if visible.isEmpty {
             tableView.deselectAll(nil)
         } else {
@@ -829,6 +882,10 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
             moveSelection(by: -1)
         case #selector(NSResponder.moveDown(_:)):
             moveSelection(by: 1)
+        case #selector(NSResponder.moveUpAndModifySelection(_:)):
+            extendSelection(by: -1)
+        case #selector(NSResponder.moveDownAndModifySelection(_:)):
+            extendSelection(by: 1)
         case #selector(NSResponder.insertNewline(_:)):
             pasteSelected()
         case #selector(NSResponder.deleteBackward(_:)), #selector(NSResponder.deleteForward(_:)):
