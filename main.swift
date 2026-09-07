@@ -317,6 +317,15 @@ enum Paster {
     /// came from first; the delay below gives that activation time to land,
     /// since posting ⌘V too early sends it nowhere.
     static func paste(_ item: ClipItem) {
+        copyOnly(item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            simulateCommandV()
+        }
+    }
+
+    /// Puts the item on the clipboard and stops there, for when you want it
+    /// ready to paste yourself rather than dropped in wherever you happen to be.
+    static func copyOnly(_ item: ClipItem) {
         let pb = NSPasteboard.general
         pb.clearContents()
         switch item.kind {
@@ -324,9 +333,6 @@ enum Paster {
             pb.setString(item.text ?? "", forType: .string)
         case .image:
             if let data = item.imageData { pb.setData(data, forType: .png) }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            simulateCommandV()
         }
     }
 
@@ -349,8 +355,10 @@ final class ClipRowView: NSTableCellView {
     private let imagePreview = NSImageView()
     private let pinButton = NSButton()
     private let deleteButton = NSButton()
+    private let copyButton = NSButton()
     var onTogglePin: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onCopy: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -379,7 +387,17 @@ final class ClipRowView: NSTableCellView {
         deleteButton.contentTintColor = .tertiaryLabelColor
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
+        deleteButton.toolTip = "حذف"
         addSubview(deleteButton)
+
+        copyButton.bezelStyle = .inline
+        copyButton.isBordered = false
+        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "نسخ")
+        copyButton.contentTintColor = .tertiaryLabelColor
+        copyButton.target = self
+        copyButton.action = #selector(copyTapped)
+        copyButton.toolTip = "نسخ فقط، دون لصق"
+        addSubview(copyButton)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -388,11 +406,13 @@ final class ClipRowView: NSTableCellView {
         super.layout()
         let pinSize: CGFloat = 22
         let deleteSize: CGFloat = 18
+        let copySize: CGFloat = 17
         pinButton.frame = NSRect(x: bounds.width - pinSize - 8, y: (bounds.height - pinSize) / 2, width: pinSize, height: pinSize)
         deleteButton.frame = NSRect(x: pinButton.frame.minX - deleteSize - 2, y: (bounds.height - deleteSize) / 2, width: deleteSize, height: deleteSize)
+        copyButton.frame = NSRect(x: deleteButton.frame.minX - copySize - 4, y: (bounds.height - copySize) / 2, width: copySize, height: copySize)
 
         let leading: CGFloat = 10
-        let contentWidth = deleteButton.frame.minX - leading - 6
+        let contentWidth = copyButton.frame.minX - leading - 6
 
         if imagePreview.image != nil {
             let thumbSize: CGFloat = bounds.height - 8
@@ -406,19 +426,26 @@ final class ClipRowView: NSTableCellView {
         }
     }
 
-    func configure(with item: ClipItem, togglePin: @escaping () -> Void, delete: @escaping () -> Void) {
+    func configure(with item: ClipItem, togglePin: @escaping () -> Void, delete: @escaping () -> Void, copy: @escaping () -> Void) {
         onTogglePin = togglePin
         onDelete = delete
+        onCopy = copy
         // Rows are recycled, so clear both slots first — otherwise an item
         // whose image fails to decode would show the previous row's picture.
         imagePreview.image = nil
         preview.stringValue = ""
+        toolTip = nil
         switch item.kind {
         case .text:
-            preview.stringValue = (item.text ?? "").replacingOccurrences(of: "\n", with: " ⏎ ")
+            let full = item.text ?? ""
+            preview.stringValue = full.replacingOccurrences(of: "\n", with: " ⏎ ")
+            // Two lines is all a row can show; hovering reveals the rest with
+            // its real line breaks, capped so a huge paste can't fill the screen.
+            toolTip = full.count > 600 ? String(full.prefix(600)) + "…" : full
         case .image:
             if let data = item.imageData, let image = NSImage(data: data) {
                 imagePreview.image = image
+                toolTip = "صورة · \(Int(image.size.width))×\(Int(image.size.height))"
             }
         }
         let symbol = item.pinned ? "pin.fill" : "pin"
@@ -433,6 +460,10 @@ final class ClipRowView: NSTableCellView {
 
     @objc private func deleteTapped() {
         onDelete?()
+    }
+
+    @objc private func copyTapped() {
+        onCopy?()
     }
 }
 
@@ -483,11 +514,17 @@ final class DragHandleView: NSView {
     }
 }
 
-final class PanelWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+final class PanelWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSSearchFieldDelegate {
     private let tableView = ClipTableView()
+    private let searchField = NSSearchField()
+    private let emptyLabel = NSTextField(labelWithString: "لا نتائج")
     private let rowHeight: CGFloat = 46
     private let headerHeight: CGFloat = 34
     private var backgroundView: NSVisualEffectView?
+
+    /// The rows actually on screen — the history filtered by the search box.
+    /// Every index the table hands back refers to this, never to the store.
+    private var visible: [ClipItem] = []
 
     /// Wired up by the app delegate — the panel itself doesn't own Settings.
     var onOpenSettings: (() -> Void)?
@@ -580,7 +617,23 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         separator.autoresizingMask = [.width, .minYMargin]
         container.addSubview(separator)
 
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: background.bounds.width, height: background.bounds.height - headerHeight - topInset - 1))
+        let searchHeight: CGFloat = 24
+        searchField.frame = NSRect(x: 10, y: separator.frame.minY - 6 - searchHeight, width: background.bounds.width - 20, height: searchHeight)
+        searchField.autoresizingMask = [.width, .minYMargin]
+        searchField.placeholderString = "ابحث في المنسوخات"
+        searchField.font = .systemFont(ofSize: 12)
+        searchField.focusRingType = .none
+        searchField.delegate = self
+        searchField.sendsWholeSearchString = false
+        container.addSubview(searchField)
+
+        let searchSeparator = NSBox(frame: NSRect(x: 0, y: searchField.frame.minY - 6, width: background.bounds.width, height: 1))
+        searchSeparator.boxType = .separator
+        searchSeparator.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(searchSeparator)
+
+        let listTop = searchSeparator.frame.minY
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: background.bounds.width, height: listTop))
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
@@ -603,6 +656,14 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
 
         scrollView.documentView = tableView
         container.addSubview(scrollView)
+
+        emptyLabel.frame = NSRect(x: 0, y: listTop / 2 - 10, width: background.bounds.width, height: 20)
+        emptyLabel.alignment = .center
+        emptyLabel.font = .systemFont(ofSize: 12)
+        emptyLabel.textColor = .tertiaryLabelColor
+        emptyLabel.autoresizingMask = [.width]
+        emptyLabel.isHidden = true
+        container.addSubview(emptyLabel)
 
         applySettings()
     }
@@ -645,6 +706,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         }
         previousApp = NSWorkspace.shared.frontmostApplication
         ClipboardStore.shared.expire()
+        searchField.stringValue = ""
         reload()
 
         let anchor = savedOrigin ?? {
@@ -663,14 +725,21 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         // than to the app the user was in. Focus goes back in dismiss().
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(tableView)
-        if !ClipboardStore.shared.items.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        }
+        // The search field is first responder so typing works immediately;
+        // its delegate forwards arrow keys, Return and Escape to the list.
+        window.makeFirstResponder(searchField)
+        selectFirstRow()
     }
 
     @objc private func reload() {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let all = ClipboardStore.shared.items
+        // localizedStandardContains ignores case and diacritics, which matters
+        // for Arabic — "لقطة" should find "لَقْطة".
+        visible = query.isEmpty ? all : all.filter { ($0.text ?? "").localizedStandardContains(query) }
         tableView.reloadData()
+        emptyLabel.isHidden = !visible.isEmpty
+        emptyLabel.stringValue = query.isEmpty ? "لا يوجد شيء منسوخ بعد" : "لا نتائج"
     }
 
     @objc private func rowClicked() {
@@ -682,10 +751,60 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     }
 
     private func pasteRow(_ row: Int) {
-        guard row >= 0, row < ClipboardStore.shared.items.count else { return }
-        let item = ClipboardStore.shared.items[row]
+        guard visible.indices.contains(row) else { return }
+        let item = visible[row]
         dismiss()
         Paster.paste(item)
+    }
+
+    private func moveSelection(by delta: Int) {
+        guard !visible.isEmpty else { return }
+        let current = tableView.selectedRow < 0 ? 0 : tableView.selectedRow
+        let next = min(max(current + delta, 0), visible.count - 1)
+        tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        tableView.scrollRowToVisible(next)
+    }
+
+    private func selectFirstRow() {
+        if visible.isEmpty {
+            tableView.deselectAll(nil)
+        } else {
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            tableView.scrollRowToVisible(0)
+        }
+    }
+
+    // MARK: NSSearchFieldDelegate
+
+    func controlTextDidChange(_ obj: Notification) {
+        reload()
+        selectFirstRow()
+    }
+
+    /// The search box holds focus so you can just type, so the keys that drive
+    /// the list have to be forwarded from here.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.moveUp(_:)):
+            moveSelection(by: -1)
+        case #selector(NSResponder.moveDown(_:)):
+            moveSelection(by: 1)
+        case #selector(NSResponder.insertNewline(_:)):
+            pasteSelected()
+        case #selector(NSResponder.cancelOperation(_:)):
+            // Escape clears the search first, and only closes an empty box —
+            // so a mistyped query doesn't cost you the whole panel.
+            if searchField.stringValue.isEmpty {
+                dismiss()
+            } else {
+                searchField.stringValue = ""
+                reload()
+                selectFirstRow()
+            }
+        default:
+            return false
+        }
+        return true
     }
 
     /// Hides the panel and hands keyboard focus back to whatever app had it
@@ -704,18 +823,21 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     // MARK: NSTableViewDataSource / Delegate
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        ClipboardStore.shared.items.count
+        visible.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("clipRow")
         let rowView = (tableView.makeView(withIdentifier: identifier, owner: self) as? ClipRowView) ?? ClipRowView(frame: .zero)
         rowView.identifier = identifier
-        let item = ClipboardStore.shared.items[row]
+        let item = visible[row]
         rowView.configure(with: item, togglePin: {
             ClipboardStore.shared.togglePin(item.id)
         }, delete: {
             ClipboardStore.shared.delete(item.id)
+        }, copy: { [weak self] in
+            self?.dismiss()
+            Paster.copyOnly(item)
         })
         return rowView
     }
