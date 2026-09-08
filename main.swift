@@ -899,7 +899,11 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     private func deleteSelected() {
         let rows = tableView.selectedRowIndexes
         guard !rows.isEmpty, rows.allSatisfy({ visible.indices.contains($0) }) else { return }
-        let ids = rows.sorted().map { visible[$0].id }
+        // Same rule as "مسح الكل": keyboard delete spares anything pinned.
+        // Only the ✕ button next to a row can remove something you've
+        // pinned — unpin it first, or click ✕, to actually delete it.
+        let ids = rows.sorted().compactMap { visible[$0].pinned ? nil : visible[$0].id }
+        guard !ids.isEmpty else { return }
         deleteRows(withIDs: ids)
     }
 
@@ -1319,10 +1323,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let panel = PanelWindowController()
     private var settings: SettingsWindowController?
     private var registeredHotKey: (code: UInt32, modifiers: UInt32)?
+    private var terminationSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         requestAccessibilityIfNeeded()
+        installTerminationHandler()
 
         SettingsStore.shared.enableLoginItemOnFirstRun()
         ClipboardWatcher.shared.start()
@@ -1386,6 +1392,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ClipboardStore.shared.flush()
+    }
+
+    /// applicationWillTerminate only fires for a graceful NSApp.terminate()
+    /// (the menu's "إنهاء لَقْطة", or ⌘Q) — an external kill/pkill sends
+    /// SIGTERM directly, which by default just ends the process on the spot.
+    /// Since a copy is saved on a background queue (see ClipboardStore.save),
+    /// that skips the pending write entirely and silently drops the most
+    /// recent one or two copies. Confirmed by direct reproduction: 5/5 raw
+    /// aborts right after a copy lost it before this handler existed.
+    private func installTerminationHandler() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            ClipboardStore.shared.flush()
+            exit(0)
+        }
+        source.resume()
+        terminationSource = source
     }
 
     /// Posting a synthetic ⌘V (see Paster) needs Accessibility access on
