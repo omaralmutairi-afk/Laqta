@@ -899,12 +899,25 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
     private func deleteSelected() {
         let rows = tableView.selectedRowIndexes
         guard !rows.isEmpty, rows.allSatisfy({ visible.indices.contains($0) }) else { return }
+        let selected = rows.sorted().map { visible[$0] }
         // Same rule as "مسح الكل": keyboard delete spares anything pinned.
         // Only the ✕ button next to a row can remove something you've
         // pinned — unpin it first, or click ✕, to actually delete it.
-        let ids = rows.sorted().compactMap { visible[$0].pinned ? nil : visible[$0].id }
-        guard !ids.isEmpty else { return }
-        deleteRows(withIDs: ids)
+        let idsToDelete = selected.filter { !$0.pinned }.map(\.id)
+        guard !idsToDelete.isEmpty else { return }
+        let sparedIDs = Set(selected.filter(\.pinned).map(\.id))
+
+        deleteRows(withIDs: idsToDelete)
+
+        // deleteRows already landed on a sensible single-row fallback; if any
+        // pinned rows from the original selection were spared, they were
+        // never touched, so put the selection back on them instead.
+        guard !sparedIDs.isEmpty else { return }
+        let restored = IndexSet(visible.indices.filter { sparedIDs.contains(visible[$0].id) })
+        guard !restored.isEmpty else { return }
+        tableView.selectRowIndexes(restored, byExtendingSelection: false)
+        anchorRow = restored.first!
+        focusRow = restored.last!
     }
 
     /// Right arrow — the keyboard equivalent of tapping a row's pin button.
@@ -1405,8 +1418,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler {
-            ClipboardStore.shared.flush()
-            exit(0)
+            // flush() blocks on the write actually finishing. Ordinary local
+            // disk I/O returns near-instantly, but SIG_IGN above means SIGTERM
+            // can no longer kill this process on its own — if the write ever
+            // hung (a dropped external/network volume, a full disk), this
+            // would otherwise deadlock the process past reach of anything
+            // short of SIGKILL. Racing it against a deadline restores the
+            // original guarantee that SIGTERM always ends the process
+            // promptly, at the cost of possibly losing that one write only
+            // in that already-pathological case.
+            DispatchQueue.global(qos: .userInitiated).async {
+                ClipboardStore.shared.flush()
+                exit(0)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                exit(0)
+            }
         }
         source.resume()
         terminationSource = source
