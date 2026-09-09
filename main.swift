@@ -487,20 +487,18 @@ final class ClipRowView: NSTableCellView {
 
         deleteButton.bezelStyle = .inline
         deleteButton.isBordered = false
-        deleteButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: L.t(.delete))
+        deleteButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)
         deleteButton.contentTintColor = .tertiaryLabelColor
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
-        deleteButton.toolTip = L.t(.delete)
         addSubview(deleteButton)
 
         copyButton.bezelStyle = .inline
         copyButton.isBordered = false
-        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: L.t(.copyOnly))
+        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
         copyButton.contentTintColor = .tertiaryLabelColor
         copyButton.target = self
         copyButton.action = #selector(copyTapped)
-        copyButton.toolTip = L.t(.copyOnlyTooltip)
         addSubview(copyButton)
     }
 
@@ -534,6 +532,15 @@ final class ClipRowView: NSTableCellView {
         onTogglePin = togglePin
         onDelete = delete
         onCopy = copy
+        // Rows are recycled across reloadData() calls (including the ones a
+        // language switch triggers), so a tooltip/label set only in init()
+        // would freeze at whatever language was active when that particular
+        // row view was first created. Refreshing here every time, like the
+        // pin button's image already does below, keeps them in sync.
+        deleteButton.toolTip = L.t(.delete)
+        deleteButton.setAccessibilityLabel(L.t(.delete))
+        copyButton.toolTip = L.t(.copyOnlyTooltip)
+        copyButton.setAccessibilityLabel(L.t(.copyOnly))
         // Rows are recycled, so clear both slots first — otherwise an item
         // whose image fails to decode would show the previous row's picture.
         imagePreview.image = nil
