@@ -913,11 +913,12 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         // pinned rows from the original selection were spared, they were
         // never touched, so put the selection back on them instead.
         guard !sparedIDs.isEmpty else { return }
-        let restored = IndexSet(visible.indices.filter { sparedIDs.contains(visible[$0].id) })
+        let restored = indices(forIDs: sparedIDs)
         guard !restored.isEmpty else { return }
         tableView.selectRowIndexes(restored, byExtendingSelection: false)
         anchorRow = restored.first!
         focusRow = restored.last!
+        tableView.scrollRowToVisible(focusRow)
     }
 
     /// Right arrow — the keyboard equivalent of tapping a row's pin button.
@@ -939,11 +940,15 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         }
     }
 
+    private func indices(forIDs ids: Set<UUID>) -> IndexSet {
+        IndexSet(visible.indices.filter { ids.contains(visible[$0].id) })
+    }
+
     /// The one path behind the ✕ button, ⌫/Delete, and ← — all three read as
     /// the same action, so they share the same slide-left-and-fade removal
     /// rather than an abrupt reloadData().
     private func deleteRows(withIDs ids: [UUID]) {
-        let rows = IndexSet(visible.indices.filter { ids.contains(visible[$0].id) })
+        let rows = indices(forIDs: Set(ids))
         guard !rows.isEmpty else { return }
         let topRow = rows.min()!
 
@@ -1403,8 +1408,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
+    /// Blocks the caller until flush() finishes or `timeout` elapses,
+    /// whichever comes first — used by every quit path so none of them can
+    /// hang past reach of anything short of SIGKILL if a write ever gets
+    /// stuck (a dropped external/network volume, a full disk). Ordinary
+    /// local disk I/O returns near-instantly, so this only ever costs the
+    /// full timeout in that already-pathological case.
+    /// - Returns: `false` if the timeout won the race, meaning flush's write
+    ///   may not have landed.
+    @discardableResult
+    private func waitForFlush(timeout: Double = 2) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            ClipboardStore.shared.flush()
+            semaphore.signal()
+        }
+        return semaphore.wait(timeout: .now() + timeout) == .success
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        ClipboardStore.shared.flush()
+        waitForFlush()
     }
 
     /// applicationWillTerminate only fires for a graceful NSApp.terminate()
@@ -1417,23 +1440,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installTerminationHandler() {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        source.setEventHandler {
-            // flush() blocks on the write actually finishing. Ordinary local
-            // disk I/O returns near-instantly, but SIG_IGN above means SIGTERM
-            // can no longer kill this process on its own — if the write ever
-            // hung (a dropped external/network volume, a full disk), this
-            // would otherwise deadlock the process past reach of anything
-            // short of SIGKILL. Racing it against a deadline restores the
-            // original guarantee that SIGTERM always ends the process
-            // promptly, at the cost of possibly losing that one write only
-            // in that already-pathological case.
-            DispatchQueue.global(qos: .userInitiated).async {
-                ClipboardStore.shared.flush()
-                exit(0)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                exit(0)
-            }
+        source.setEventHandler { [weak self] in
+            self?.waitForFlush()
+            exit(0)
         }
         source.resume()
         terminationSource = source
