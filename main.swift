@@ -44,6 +44,7 @@ final class SettingsStore {
         static let hotKeyCode = "hotKeyCode"
         static let hotKeyModifiers = "hotKeyModifiers"
         static let hotKeyDisplay = "hotKeyDisplay"
+        static let language = "appLanguage"
     }
 
     private let defaults = UserDefaults.standard
@@ -100,9 +101,77 @@ final class SettingsStore {
         changed()
     }
 
+    var language: AppLanguage {
+        get { AppLanguage(rawValue: defaults.string(forKey: Key.language) ?? "") ?? .ar }
+        set { defaults.set(newValue.rawValue, forKey: Key.language); changed() }
+    }
+
     private func changed() {
         NotificationCenter.default.post(name: .laqtaSettingsChanged, object: nil)
     }
+}
+
+enum AppLanguage: String, CaseIterable {
+    case ar, en
+    var displayName: String { self == .ar ? "العربية" : "English" }
+    var layoutDirection: NSUserInterfaceLayoutDirection { self == .ar ? .rightToLeft : .leftToRight }
+}
+
+/// Every user-facing string in one place, since this single-file app has no
+/// Xcode asset pipeline for real .lproj/NSLocalizedString support. Looked up
+/// fresh each call against the current setting — only already-built UI text
+/// (the panel and the settings window, both rebuilt wholesale on a language
+/// change) needs an explicit refresh when it changes.
+enum L {
+    enum Key {
+        case panelTitle, searchPlaceholder, clearAll, settingsTooltip, noResultsYet,
+             noResults, pin, delete, copyOnly, copyOnlyTooltip, imageDimensions,
+             settingsWindowTitle, maxItemsRow, retentionRow, opacityRow, hotkeyRow,
+             languageRow, launchAtLoginCheckbox, pinnedNote, pressCombo,
+             statusItemAccessibility, settingsMenuItem, quitMenuItem,
+             retentionOneHour, retentionHours4, retentionHours8, retentionHours12,
+             retentionHours24, retentionDays3, retentionWeek
+    }
+
+    private static let table: [Key: (ar: String, en: String)] = [
+        .panelTitle: ("لَقْطة", "Laqta"),
+        .searchPlaceholder: ("ابحث في المنسوخات", "Search your clips"),
+        .clearAll: ("مسح الكل", "Clear all"),
+        .settingsTooltip: ("الإعدادات", "Settings"),
+        .noResultsYet: ("لا يوجد شيء منسوخ بعد", "Nothing copied yet"),
+        .noResults: ("لا نتائج", "No results"),
+        .pin: ("تثبيت", "Pin"),
+        .delete: ("حذف", "Delete"),
+        .copyOnly: ("نسخ", "Copy"),
+        .copyOnlyTooltip: ("نسخ فقط، دون لصق", "Copy only, don't paste"),
+        .imageDimensions: ("صورة", "Image"),
+        .settingsWindowTitle: ("إعدادات لَقْطة", "Laqta Settings"),
+        .maxItemsRow: ("عدد العناصر المحفوظة", "Items to keep"),
+        .retentionRow: ("مدة حفظ غير المثبت", "Keep unpinned for"),
+        .opacityRow: ("شفافية اللوحة", "Panel opacity"),
+        .hotkeyRow: ("اختصار الفتح", "Open shortcut"),
+        .languageRow: ("اللغة", "Language"),
+        .launchAtLoginCheckbox: ("تشغيل لَقْطة تلقائيًا عند بدء تشغيل الماك", "Launch Laqta automatically at startup"),
+        .pinnedNote: ("العناصر المثبتة (📌) لا تنتهي صلاحيتها ولا تتأثر بالمدة.", "Pinned items (📌) never expire and aren't affected by the retention window."),
+        .pressCombo: ("اضغط الاختصار…", "Press a shortcut…"),
+        .statusItemAccessibility: ("لَقْطة", "Laqta"),
+        .settingsMenuItem: ("الإعدادات…", "Settings…"),
+        .quitMenuItem: ("إنهاء لَقْطة", "Quit Laqta"),
+        .retentionOneHour: ("ساعة واحدة", "1 hour"),
+        .retentionHours4: ("٤ ساعات", "4 hours"),
+        .retentionHours8: ("٨ ساعات", "8 hours"),
+        .retentionHours12: ("١٢ ساعة", "12 hours"),
+        .retentionHours24: ("٢٤ ساعة", "24 hours"),
+        .retentionDays3: ("٣ أيام", "3 days"),
+        .retentionWeek: ("أسبوع", "1 week"),
+    ]
+
+    static func t(_ key: Key) -> String {
+        let pair = table[key]!
+        return SettingsStore.shared.language == .ar ? pair.ar : pair.en
+    }
+
+    static var percentSign: String { SettingsStore.shared.language == .ar ? "٪" : "%" }
 }
 
 // MARK: - Model
@@ -418,20 +487,20 @@ final class ClipRowView: NSTableCellView {
 
         deleteButton.bezelStyle = .inline
         deleteButton.isBordered = false
-        deleteButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "حذف")
+        deleteButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: L.t(.delete))
         deleteButton.contentTintColor = .tertiaryLabelColor
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
-        deleteButton.toolTip = "حذف"
+        deleteButton.toolTip = L.t(.delete)
         addSubview(deleteButton)
 
         copyButton.bezelStyle = .inline
         copyButton.isBordered = false
-        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "نسخ")
+        copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: L.t(.copyOnly))
         copyButton.contentTintColor = .tertiaryLabelColor
         copyButton.target = self
         copyButton.action = #selector(copyTapped)
-        copyButton.toolTip = "نسخ فقط، دون لصق"
+        copyButton.toolTip = L.t(.copyOnlyTooltip)
         addSubview(copyButton)
     }
 
@@ -484,11 +553,11 @@ final class ClipRowView: NSTableCellView {
         case .image:
             if let data = item.imageData, let image = NSImage(data: data) {
                 imagePreview.image = image
-                toolTip = "صورة · \(Int(image.size.width))×\(Int(image.size.height))"
+                toolTip = "\(L.t(.imageDimensions)) · \(Int(image.size.width))×\(Int(image.size.height))"
             }
         }
         let symbol = item.pinned ? "pin.fill" : "pin"
-        pinButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "تثبيت")
+        pinButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: L.t(.pin))
         pinButton.contentTintColor = item.pinned ? .controlAccentColor : .tertiaryLabelColor
         needsLayout = true
     }
@@ -586,7 +655,8 @@ final class DragHandleView: NSView {
 final class PanelWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSSearchFieldDelegate {
     private let tableView = ClipTableView()
     private let searchField = NSSearchField()
-    private let emptyLabel = NSTextField(labelWithString: "لا نتائج")
+    private let emptyLabel = NSTextField(labelWithString: "")
+    private var lastLanguage: AppLanguage?
     private let rowHeight: CGFloat = 46
     private let headerHeight: CGFloat = 34
     private var backgroundView: NSVisualEffectView?
@@ -630,9 +700,21 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         NotificationCenter.default.addObserver(
             self, selector: #selector(reload), name: .clipHistoryChanged, object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(languageMaybeChanged), name: .laqtaSettingsChanged, object: nil
+        )
+    }
+
+    /// The panel is always hidden while Settings is open (see settingsTapped),
+    /// so a full teardown-and-rebuild here has no visible interruption — it
+    /// only takes effect the next time the hotkey opens the panel again.
+    @objc private func languageMaybeChanged() {
+        guard let panel = window as? ClipPanel, SettingsStore.shared.language != lastLanguage else { return }
+        buildUI(in: panel)
     }
 
     private func buildUI(in panel: NSPanel) {
+        lastLanguage = SettingsStore.shared.language
         // The blurred backdrop is a sibling behind the content rather than
         // its superview, so the opacity setting can fade the background
         // without dragging the text's readability down with it.
@@ -655,7 +737,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         header.autoresizingMask = [.width, .minYMargin]
         header.onMoved = { [weak self] in self?.savePanelOrigin() }
 
-        let title = NSTextField(labelWithString: "لَقْطة")
+        let title = NSTextField(labelWithString: L.t(.panelTitle))
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         title.textColor = .secondaryLabelColor
         let titleHeight: CGFloat = 16
@@ -666,16 +748,16 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         let settingsButton = NSButton()
         settingsButton.bezelStyle = .inline
         settingsButton.isBordered = false
-        settingsButton.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "الإعدادات")
+        settingsButton.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: L.t(.settingsTooltip))
         settingsButton.contentTintColor = .secondaryLabelColor
         settingsButton.target = self
         settingsButton.action = #selector(settingsTapped)
-        settingsButton.toolTip = "الإعدادات"
+        settingsButton.toolTip = L.t(.settingsTooltip)
         settingsButton.frame = NSRect(x: background.bounds.width - gearSize - 12, y: (headerHeight - gearSize) / 2, width: gearSize, height: gearSize)
         settingsButton.autoresizingMask = [.minXMargin]
         header.addSubview(settingsButton)
 
-        let clearAllButton = NSButton(title: "مسح الكل", target: self, action: #selector(clearAllTapped))
+        let clearAllButton = NSButton(title: L.t(.clearAll), target: self, action: #selector(clearAllTapped))
         clearAllButton.bezelStyle = .inline
         clearAllButton.isBordered = false
         clearAllButton.font = .systemFont(ofSize: 11)
@@ -695,7 +777,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         let searchHeight: CGFloat = 24
         searchField.frame = NSRect(x: 10, y: separator.frame.minY - 6 - searchHeight, width: background.bounds.width - 20, height: searchHeight)
         searchField.autoresizingMask = [.width, .minYMargin]
-        searchField.placeholderString = "ابحث في المنسوخات"
+        searchField.placeholderString = L.t(.searchPlaceholder)
         searchField.font = .systemFont(ofSize: 12)
         searchField.focusRingType = .none
         searchField.delegate = self
@@ -831,7 +913,7 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         // for Arabic — "لقطة" should find "لَقْطة".
         visible = query.isEmpty ? all : all.filter { ($0.text ?? "").localizedStandardContains(query) }
         emptyLabel.isHidden = !visible.isEmpty
-        emptyLabel.stringValue = query.isEmpty ? "لا يوجد شيء منسوخ بعد" : "لا نتائج"
+        emptyLabel.stringValue = query.isEmpty ? L.t(.noResultsYet) : L.t(.noResults)
         // deleteRows(withIDs:) already told the table exactly which rows left
         // and is mid-animation — a full reloadData() here would cut it off.
         guard !suppressTableReload else { return }
@@ -1130,25 +1212,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let loginItemCheckbox = NSButton()
 
     private var recordMonitor: Any?
+    private var lastLanguage: AppLanguage?
 
-    private let retentionOptions: [(label: String, hours: Int)] = [
-        ("ساعة واحدة", 1),
-        ("٤ ساعات", 4),
-        ("٨ ساعات", 8),
-        ("١٢ ساعة", 12),
-        ("٢٤ ساعة", 24),
-        ("٣ أيام", 72),
-        ("أسبوع", 168),
+    private let retentionOptions: [(key: L.Key, hours: Int)] = [
+        (.retentionOneHour, 1),
+        (.retentionHours4, 4),
+        (.retentionHours8, 8),
+        (.retentionHours12, 12),
+        (.retentionHours24, 24),
+        (.retentionDays3, 72),
+        (.retentionWeek, 168),
     ]
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 260),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 300),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "إعدادات لَقْطة"
         window.center()
         // The delegate keeps this controller alive and reopens the same
         // window, so closing must not deallocate it.
@@ -1157,10 +1239,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         buildUI(in: window)
         refresh()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(settingsChanged), name: .laqtaSettingsChanged, object: nil
+        )
+    }
+
+    /// Only an actual language flip needs the heavier full rebuild — every
+    /// other control already reads/writes SettingsStore live, and rebuilding
+    /// on every change would drop e.g. a slider drag mid-interaction.
+    @objc private func settingsChanged() {
+        guard let window, SettingsStore.shared.language != lastLanguage else { return }
+        buildUI(in: window)
+        refresh()
     }
 
     private func buildUI(in window: NSWindow) {
-        guard let content = window.contentView else { return }
+        let settings = SettingsStore.shared
+        lastLanguage = settings.language
+        window.title = L.t(.settingsWindowTitle)
+
+        let content = NSView()
+        content.userInterfaceLayoutDirection = settings.language.layoutDirection
+        window.contentView = content
 
         maxItemsField.formatter = {
             let f = NumberFormatter()
@@ -1181,7 +1281,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         maxItemsStepper.target = self
         maxItemsStepper.action = #selector(maxItemsStepped)
 
-        retentionPopup.addItems(withTitles: retentionOptions.map(\.label))
+        retentionPopup.removeAllItems()
+        retentionPopup.addItems(withTitles: retentionOptions.map { L.t($0.key) })
         retentionPopup.target = self
         retentionPopup.action = #selector(retentionChanged)
 
@@ -1200,20 +1301,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hotKeyButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
         loginItemCheckbox.setButtonType(.switch)
-        loginItemCheckbox.title = "تشغيل لَقْطة تلقائيًا عند بدء تشغيل الماك"
+        loginItemCheckbox.title = L.t(.launchAtLoginCheckbox)
         loginItemCheckbox.font = .systemFont(ofSize: 13)
         loginItemCheckbox.target = self
         loginItemCheckbox.action = #selector(loginItemToggled)
 
-        let note = NSTextField(labelWithString: "العناصر المثبتة (📌) لا تنتهي صلاحيتها ولا تتأثر بالمدة.")
+        let languagePopup = NSPopUpButton()
+        languagePopup.addItems(withTitles: AppLanguage.allCases.map(\.displayName))
+        languagePopup.selectItem(at: AppLanguage.allCases.firstIndex(of: settings.language) ?? 0)
+        languagePopup.target = self
+        languagePopup.action = #selector(languageChanged(_:))
+
+        let note = NSTextField(labelWithString: L.t(.pinnedNote))
         note.font = .systemFont(ofSize: 11)
         note.textColor = .tertiaryLabelColor
 
         let stack = NSStackView(views: [
-            row("عدد العناصر المحفوظة", [maxItemsField, maxItemsStepper]),
-            row("مدة حفظ غير المثبت", [retentionPopup]),
-            row("شفافية اللوحة", [opacitySlider, opacityValue]),
-            row("اختصار الفتح", [hotKeyButton]),
+            row(L.t(.maxItemsRow), [maxItemsField, maxItemsStepper]),
+            row(L.t(.retentionRow), [retentionPopup]),
+            row(L.t(.opacityRow), [opacitySlider, opacityValue]),
+            row(L.t(.hotkeyRow), [hotKeyButton]),
+            row(L.t(.languageRow), [languagePopup]),
             loginItemCheckbox,
             note,
         ])
@@ -1233,7 +1341,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func row(_ title: String, _ controls: [NSView]) -> NSView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13)
-        label.alignment = .right
+        label.alignment = .natural
         label.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
         let stack = NSStackView(views: [label] + controls)
@@ -1251,9 +1359,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             retentionPopup.selectItem(at: idx)
         }
         opacitySlider.doubleValue = s.opacity
-        opacityValue.stringValue = "\(Int(s.opacity * 100))٪"
+        opacityValue.stringValue = "\(Int(s.opacity * 100))\(L.percentSign)"
         hotKeyButton.title = s.hotKeyDisplay
         loginItemCheckbox.state = s.launchAtLogin ? .on : .off
+    }
+
+    @objc private func languageChanged(_ sender: NSPopUpButton) {
+        SettingsStore.shared.language = AppLanguage.allCases[sender.indexOfSelectedItem]
     }
 
     // MARK: Actions
@@ -1277,7 +1389,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func opacityChanged() {
         SettingsStore.shared.opacity = opacitySlider.doubleValue
-        opacityValue.stringValue = "\(Int(opacitySlider.doubleValue * 100))٪"
+        opacityValue.stringValue = "\(Int(opacitySlider.doubleValue * 100))\(L.percentSign)"
     }
 
     @objc private func loginItemToggled() {
@@ -1288,7 +1400,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func hotKeyTapped() {
         guard recordMonitor == nil else { stopRecording(); return }
-        hotKeyButton.title = "اضغط الاختصار…"
+        hotKeyButton.title = L.t(.pressCombo)
         recordMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.capture(event)
             return nil // swallow it so the combo doesn't reach anything else
@@ -1342,6 +1454,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: SettingsWindowController?
     private var registeredHotKey: (code: UInt32, modifiers: UInt32)?
     private var terminationSource: DispatchSourceSignal?
+    private var settingsMenuItem: NSMenuItem!
+    private var quitMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -1354,12 +1468,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onOpenSettings = { [weak self] in self?.showSettings() }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "لَقْطة")
+        statusItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: L.t(.statusItemAccessibility))
 
+        settingsMenuItem = NSMenuItem(title: L.t(.settingsMenuItem), action: #selector(showSettings), keyEquivalent: "")
+        quitMenuItem = NSMenuItem(title: L.t(.quitMenuItem), action: #selector(quit), keyEquivalent: "")
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "الإعدادات…", action: #selector(showSettings), keyEquivalent: ""))
+        menu.addItem(settingsMenuItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "إنهاء لَقْطة", action: #selector(quit), keyEquivalent: ""))
+        menu.addItem(quitMenuItem)
         menu.items.forEach { $0.target = self }
         statusItem.menu = menu
 
@@ -1386,6 +1502,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
         ClipboardStore.shared.settingsChanged()
         panel.applySettings()
+        settingsMenuItem.title = L.t(.settingsMenuItem)
+        quitMenuItem.title = L.t(.quitMenuItem)
+        statusItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: L.t(.statusItemAccessibility))
     }
 
     private func registerHotKey() {
