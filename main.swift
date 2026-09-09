@@ -821,9 +821,17 @@ final class PanelWindowController: NSWindowController, NSTableViewDataSource, NS
         tableView.onDeleteSelected = { [weak self] in self?.deleteSelected() }
         tableView.onTogglePinSelected = { [weak self] in self?.togglePinSelected() }
 
-        let column = NSTableColumn(identifier: .init("clip"))
-        column.width = 300
-        tableView.addTableColumn(column)
+        // tableView is a persistent instance property reused across every
+        // rebuild (a language change tears down and rebuilds this whole UI),
+        // but addTableColumn always appends — without this guard, each
+        // rebuild added a duplicate column on top of the existing one, so
+        // every row rendered its content once per column, wide enough to
+        // scroll to horizontally and look like repeated/duplicated text.
+        if tableView.tableColumns.isEmpty {
+            let column = NSTableColumn(identifier: .init("clip"))
+            column.width = 300
+            tableView.addTableColumn(column)
+        }
 
         scrollView.documentView = tableView
         container.addSubview(scrollView)
